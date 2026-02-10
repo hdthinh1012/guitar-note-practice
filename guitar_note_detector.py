@@ -44,6 +44,121 @@ GUITAR_STRINGS = {
 }
 
 
+# ─── Terminal Colors ─────────────────────────────────────────────────────────
+RST = "\033[0m"
+DIM = "\033[2m"
+
+# ─── ASCII Music Staff Renderer (G-clef 8vb) ────────────────────────────────
+#
+# Diatonic note order within an octave (C-based):
+#   C=0  D=1  E=2  F=3  G=4  A=5  B=6
+# Treble clef lines (bottom→top): E4 G4 B4 D5 F5  (positions 0,2,4,6,8)
+# Guitar notation is written one octave higher than sounding pitch.
+
+_DIATONIC = {"C": 0, "D": 1, "E": 2, "F": 3, "G": 4, "A": 5, "B": 6}
+
+
+def _parse_note(note_str: str):
+    """Parse 'C#4' → ('C', True, 4) or 'A2' → ('A', False, 2)."""
+    if "#" in note_str:
+        return note_str[0], True, int(note_str[2:])
+    else:
+        return note_str[0], False, int(note_str[1:])
+
+
+def _diatonic_from_c0(letter: str, octave: int) -> int:
+    """Absolute diatonic position from C0.  C0=0, D0=1 … B0=6, C1=7 …"""
+    return octave * 7 + _DIATONIC[letter]
+
+
+_TREBLE_BOTTOM = _diatonic_from_c0("E", 4)  # bottom line of treble staff
+
+
+def _staff_position(letter: str, octave: int, clef_bottom: int) -> int:
+    """Return the staff position (0 = bottom line). Even→line, Odd→space."""
+    return _diatonic_from_c0(letter, octave) - clef_bottom
+
+
+def _render_staff(note_str: str | None, clef_bottom: int, clef_label: str,
+                  width: int = 37) -> list[str]:
+    """Render a single 5-line staff with an optional note placed on it."""
+    POS_MIN = -8
+    POS_MAX = 16
+    STAFF_LINES = {0, 2, 4, 6, 8}
+
+    pos = None
+    is_sharp = False
+    if note_str:
+        letter, is_sharp, octave = _parse_note(note_str)
+        pos = _staff_position(letter, octave, clef_bottom)
+
+    rows = []
+    COL_NOTE = 20
+    COL_SHARP = 17
+    LEDGER_L = COL_NOTE - 2
+    LEDGER_R = COL_NOTE + 2
+
+    for p in range(POS_MAX, POS_MIN - 1, -1):
+        is_line = p in STAFF_LINES
+        on_note = (pos is not None and p == pos)
+
+        if is_line:
+            left = f"  {clef_label:>12s} " if p == 4 else "               "
+            bar = list("─" * width)
+        else:
+            left = "               "
+            bar = list(" " * width)
+
+        if on_note:
+            if is_line:
+                bar[COL_NOTE - 1] = " "
+                bar[COL_NOTE] = "●"
+                bar[COL_NOTE + 1] = " "
+            else:
+                bar[COL_NOTE] = "●"
+            if is_sharp:
+                bar[COL_SHARP] = "♯"
+            if p % 2 == 0 and p not in STAFF_LINES:
+                for c in range(LEDGER_L, LEDGER_R + 1):
+                    if 0 <= c < width and c != COL_NOTE:
+                        bar[c] = "─"
+        else:
+            if pos is not None and p % 2 == 0 and p not in STAFF_LINES:
+                need_ledger = False
+                if p < 0 and pos <= p:
+                    need_ledger = True
+                if p > 8 and pos >= p:
+                    need_ledger = True
+                if need_ledger:
+                    for c in range(LEDGER_L, LEDGER_R + 1):
+                        if 0 <= c < width:
+                            bar[c] = "─"
+
+        rows.append(left + "".join(bar))
+    return rows
+
+
+def render_guitar_staff(note_str: str | None) -> list[str]:
+    """Render guitar staff (G-clef 8vb). Written pitch = sounding + 1 octave."""
+    if note_str:
+        letter, is_sharp, octave = _parse_note(note_str)
+        written_octave = octave + 1
+        written_note = f"{letter}{'#' if is_sharp else ''}{written_octave}"
+    else:
+        written_note = None
+
+    header = [f"  {DIM}┌─ Guitar staff (G-clef 8vb) ──────────────────────────┐{RST}"]
+    staff = _render_staff(written_note, _TREBLE_BOTTOM, "𝄞₈ᵥᵦ")
+    footer = [f"  {DIM}└──────────────────────────────────────────────────────┘{RST}"]
+    return header + [f"  {DIM}│{RST}{r}" for r in staff] + footer
+
+
+# Total lines the staff display occupies (header + 25 rows + footer)
+STAFF_DISPLAY_LINES = 27
+# Total display lines: 2 (note info + tuner) + 1 (blank) + 27 (staff) = 30
+TOTAL_DISPLAY_LINES = 30
+
+
 # ─── YIN Algorithm (Pure Numpy) ─────────────────────────────────────────────
 
 def yin_pitch(signal: np.ndarray, sample_rate: int, threshold: float = YIN_THRESHOLD) -> float | None:
@@ -208,22 +323,29 @@ def build_tuner_bar(cents: float, width: int = 40) -> str:
 
 
 def display_detection(freq: float, note: str, octave: int, cents: float, rms: float):
-    """Display the current detection result."""
+    """Display the current detection result with guitar staff notation."""
     nearest_string = find_nearest_string(freq)
     string_info = f"  (nearest: {nearest_string})" if nearest_string else ""
 
     tuner_bar = build_tuner_bar(cents)
+    note_str = f"{note}{octave}"
 
-    # Build the display
+    # Build the display lines
     lines = [
-        f"\033[2K  Note: \033[1;97m{note}{octave}\033[0m   "
+        f"\033[2K  Note: \033[1;97m{note_str}\033[0m   "
         f"Freq: \033[96m{freq:.1f} Hz\033[0m   "
         f"Volume: {'█' * min(20, int(rms * 200))}{'░' * (20 - min(20, int(rms * 200)))}",
         f"\033[2K  {tuner_bar}{string_info}",
+        f"\033[2K",
     ]
 
+    # Add the guitar staff
+    staff_lines = render_guitar_staff(note_str)
+    for sl in staff_lines:
+        lines.append(f"\033[2K{sl}")
+
     # Move cursor up and overwrite
-    sys.stdout.write(f"\033[2A")
+    sys.stdout.write(f"\033[{TOTAL_DISPLAY_LINES}A")
     for line in lines:
         sys.stdout.write(f"\r{line}\n")
     sys.stdout.flush()
@@ -247,9 +369,9 @@ def main():
     # Pitch smoothing buffer
     pitch_buffer: list[float] = []
 
-    # Print two blank lines that we'll overwrite
-    print()
-    print()
+    # Reserve blank lines for the display area (note info + tuner + staff)
+    for _ in range(TOTAL_DISPLAY_LINES):
+        print()
 
     def audio_callback(indata: np.ndarray, frames: int, time_info, status):
         nonlocal pitch_buffer
@@ -263,9 +385,10 @@ def main():
         # Check volume (RMS)
         rms = float(np.sqrt(np.mean(signal ** 2)))
         if rms < SILENCE_THRESHOLD:
-            sys.stdout.write(f"\033[2A")
+            sys.stdout.write(f"\033[{TOTAL_DISPLAY_LINES}A")
             sys.stdout.write(f"\r\033[2K  🔇 Listening... (play a note)\n")
-            sys.stdout.write(f"\r\033[2K\n")
+            for _ in range(TOTAL_DISPLAY_LINES - 1):
+                sys.stdout.write(f"\r\033[2K\n")
             sys.stdout.flush()
             pitch_buffer.clear()
             return
@@ -274,9 +397,10 @@ def main():
         freq = yin_pitch(signal, SAMPLE_RATE)
 
         if freq is None or freq < MIN_FREQ or freq > MAX_FREQ:
-            sys.stdout.write(f"\033[2A")
+            sys.stdout.write(f"\033[{TOTAL_DISPLAY_LINES}A")
             sys.stdout.write(f"\r\033[2K  🔇 No pitch detected...\n")
-            sys.stdout.write(f"\r\033[2K\n")
+            for _ in range(TOTAL_DISPLAY_LINES - 1):
+                sys.stdout.write(f"\r\033[2K\n")
             sys.stdout.flush()
             return
 
