@@ -485,42 +485,167 @@ def render(bpm, score, total, target_note, current_beat, last_result, phase):
     sys.stdout.flush()
 
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# ─── Easy Mode Display ───────────────────────────────────────────────────────
 
-def main():
-    # ── Welcome screen ───────────────────────────────────────────────────
-    sys.stdout.write("\033[2J\033[H")  # clear
-    print()
-    print(f"  {BOLD}🎸  Guitar Note Practice Tool{RST}")
-    print(f"  {DIM}{'━' * 40}{RST}")
-    print()
-    print(f"  Practice playing the correct note on your guitar!")
-    print(f"  Note range: {CYAN}E2 → G4{RST}  (28 notes, standard guitar range)")
-    print()
-    print(f"  How each bar works:")
-    print(f"    Beat 1  {RED}●{RST}  HIGH tick   – new bar")
-    print(f"    Beat 2  {YELLOW}●{RST}  MID tick    – 🎸 play the note HERE!")
-    print(f"    Beat 3  {DIM}●{RST}  LOW tick    – still listening …")
-    print(f"    Beat 4  {DIM}●{RST}  LOW tick    – result shown + next note")
-    print()
+def render_easy(score, total, target_note, last_result, status):
+    """Redraw the easy-mode UI."""
+    pct = (score / total * 100) if total > 0 else 0
 
-    # ── Get BPM ──────────────────────────────────────────────────────────
-    while True:
-        try:
-            raw = input(f"  Enter tempo (BPM, 40–200) [{CYAN}80{RST}]: ").strip()
-            if raw == "":
-                bpm = 80
+    lines = [
+        "",
+        f"  {BOLD}🎸  Guitar Note Practice  —  Easy Mode{RST}",
+        f"  {DIM}{'━' * 50}{RST}",
+        f"  Score: {GREEN}{score}{RST}/{total}  │  Accuracy: {pct:.0f}%",
+        f"  {DIM}{'━' * 50}{RST}",
+        "",
+    ]
+
+    if target_note:
+        lines.append(f"  🎯  Play this note:   {BOLD}>>> {YELLOW}{target_note}{RST}{BOLD} <<<{RST}")
+        lines.append("")
+    else:
+        lines.append(f"  {DIM}Waiting …{RST}")
+        lines.append("")
+
+    # ── Music staff notation ─────────────────────────────────────────
+    if target_note:
+        guitar_lines = render_guitar_staff(target_note)
+        lines += guitar_lines
+        lines.append("")
+    else:
+        for _ in range(28):
+            lines.append("")
+
+    # Status line (listening / detected)
+    if status:
+        lines.append(f"  {status}")
+    else:
+        lines.append(f"  {DIM}🎤 Play the note on your guitar …{RST}")
+    lines.append("")
+
+    if last_result:
+        lines.append(f"  {last_result}")
+    else:
+        lines.append(f"  {DIM}(results will appear here){RST}")
+
+    lines.append("")
+    lines.append(f"  {DIM}Press Ctrl+C to exit{RST}")
+    lines.append("")
+
+    # Jump to top-left and write
+    sys.stdout.write("\033[H")
+    for line in lines:
+        sys.stdout.write(f"{CLR_LINE}{line}\n")
+    sys.stdout.flush()
+
+
+# ─── Easy Mode ───────────────────────────────────────────────────────────────
+
+def easy_mode():
+    """Easy mode: display a note, wait for the user to play it, verify, repeat."""
+
+    listener = PitchListener()
+    listener.start()
+
+    score = 0
+    total = 0
+    last_result = None
+
+    # Pick the first target note
+    target_note = random.choice(PRACTICE_NOTES)["name"]
+
+    sys.stdout.write("\033[2J\033[H")  # clear for main UI
+
+    try:
+        while True:
+            # ── Show target and listen ────────────────────────────
+            render_easy(score, total, target_note, last_result,
+                        f"{CYAN}🎤 Listening … play {YELLOW}{target_note}{RST}")
+
+            listener.begin_listening()
+
+            # ── Collect microphone samples until a stable note is detected ──
+            # We accumulate detections over short windows and require
+            # a minimum number of consistent readings for reliability.
+            detected = None
+            MIN_CONSISTENT = 4          # need this many agreeing samples
+            POLL_INTERVAL = 0.12        # seconds between polls
+            consistent_count = 0
+            last_detected = None
+
+            while detected is None:
+                time.sleep(POLL_INTERVAL)
+
+                # Peek at current detections without clearing
+                with listener._lock:
+                    detections = listener._detections.copy()
+
+                if not detections:
+                    consistent_count = 0
+                    last_detected = None
+                    continue
+
+                # Take the most common note in the buffer
+                counter = Counter(detections)
+                top_note = counter.most_common(1)[0][0]
+
+                if top_note == last_detected:
+                    consistent_count += 1
+                else:
+                    last_detected = top_note
+                    consistent_count = 1
+
+                # Update status while listening
+                render_easy(score, total, target_note, last_result,
+                            f"{CYAN}🎤 Hearing: {WHITE}{top_note}{RST}")
+
+                if consistent_count >= MIN_CONSISTENT:
+                    detected = top_note
+
+            listener.end_listening()
+
+            # ── Evaluate ─────────────────────────────────────────
+            total += 1
+            if detected == target_note:
+                score += 1
+                last_result = (
+                    f"{GREEN}✓  Correct!{RST}  "
+                    f"Played {GREEN}{detected}{RST}"
+                )
             else:
-                bpm = int(raw)
-            if 40 <= bpm <= 200:
-                break
-            print(f"  {RED}Please enter a value between 40 and 200.{RST}")
-        except ValueError:
-            print(f"  {RED}Please enter a valid number.{RST}")
+                last_result = (
+                    f"{RED}✗  Wrong!{RST}   "
+                    f"Played {RED}{detected}{RST}  "
+                    f"Expected {YELLOW}{target_note}{RST}"
+                )
+
+            # ── Show result briefly, then next note ──────────────
+            render_easy(score, total, target_note, last_result,
+                        f"{DIM}Next note in a moment …{RST}")
+            time.sleep(1.5)
+
+            # Pick next target
+            target_note = random.choice(PRACTICE_NOTES)["name"]
+
+    except KeyboardInterrupt:
+        listener.stop()
+        _print_scoreboard(score, total)
+
+    except sd.PortAudioError as e:
+        listener.stop()
+        print(f"\n  {RED}❌ Audio error: {e}{RST}")
+        print(f"  Make sure your microphone is connected.")
+        print(f"  On Fedora: sudo dnf install pipewire pipewire-pulseaudio")
+        sys.exit(1)
+
+
+# ─── Hard Mode ───────────────────────────────────────────────────────────────
+
+def hard_mode(bpm: int):
+    """Hard mode: metronome-driven practice with timed note detection."""
 
     beat_duration = 60.0 / bpm
 
-    # ── Init ─────────────────────────────────────────────────────────────
     listener = PitchListener()
     listener.start()
 
@@ -529,7 +654,7 @@ def main():
     target_note = None
     last_result = None
 
-    # ── Countdown ────────────────────────────────────────────────────────
+    # ── Countdown ────────────────────────────────────────────────────
     sys.stdout.write("\033[2J\033[H")
     for i in range(3, 0, -1):
         sys.stdout.write(f"\033[H\n\n  Starting in {BOLD}{i}{RST} …\n")
@@ -538,7 +663,7 @@ def main():
 
     sys.stdout.write("\033[2J\033[H")  # clear for main UI
 
-    # ── Practice loop ────────────────────────────────────────────────────
+    # ── Practice loop ────────────────────────────────────────────────
     try:
         bar = 0
         next_beat_time = time.monotonic()
@@ -599,27 +724,7 @@ def main():
 
     except KeyboardInterrupt:
         listener.stop()
-
-        # ── Final scoreboard ─────────────────────────────────────────
-        print("\n\n")
-        print(f"  {BOLD}📊  Final Score{RST}")
-        print(f"  {DIM}{'━' * 30}{RST}")
-        if total > 0:
-            pct = score / total * 100
-            print(f"  Correct: {GREEN}{score}{RST} / {total}  ({pct:.0f}%)")
-            if pct >= 90:
-                print(f"  {GREEN}🌟 Excellent!{RST}")
-            elif pct >= 70:
-                print(f"  {YELLOW}👍 Good job!{RST}")
-            elif pct >= 50:
-                print(f"  {YELLOW}💪 Keep practicing!{RST}")
-            else:
-                print(f"  {RED}🎯 More practice needed – keep at it!{RST}")
-        else:
-            print(f"  No notes attempted.")
-        print()
-        print(f"  👋  Happy practicing! 🎸")
-        print()
+        _print_scoreboard(score, total)
 
     except sd.PortAudioError as e:
         listener.stop()
@@ -627,6 +732,97 @@ def main():
         print(f"  Make sure your microphone is connected.")
         print(f"  On Fedora: sudo dnf install pipewire pipewire-pulseaudio")
         sys.exit(1)
+
+
+# ─── Shared Scoreboard ───────────────────────────────────────────────────────
+
+def _print_scoreboard(score: int, total: int):
+    """Print the final score summary."""
+    print("\n\n")
+    print(f"  {BOLD}📊  Final Score{RST}")
+    print(f"  {DIM}{'━' * 30}{RST}")
+    if total > 0:
+        pct = score / total * 100
+        print(f"  Correct: {GREEN}{score}{RST} / {total}  ({pct:.0f}%)")
+        if pct >= 90:
+            print(f"  {GREEN}🌟 Excellent!{RST}")
+        elif pct >= 70:
+            print(f"  {YELLOW}👍 Good job!{RST}")
+        elif pct >= 50:
+            print(f"  {YELLOW}💪 Keep practicing!{RST}")
+        else:
+            print(f"  {RED}🎯 More practice needed – keep at it!{RST}")
+    else:
+        print(f"  No notes attempted.")
+    print()
+    print(f"  👋  Happy practicing! 🎸")
+    print()
+
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+def main():
+    # ── Welcome screen ───────────────────────────────────────────────────
+    sys.stdout.write("\033[2J\033[H")  # clear
+    print()
+    print(f"  {BOLD}🎸  Guitar Note Practice Tool{RST}")
+    print(f"  {DIM}{'━' * 50}{RST}")
+    print()
+    print(f"  Practice playing the correct note on your guitar!")
+    print(f"  Note range: {CYAN}E2 → G4{RST}  (28 notes, standard guitar range)")
+    print()
+    print(f"  {BOLD}Choose a mode:{RST}")
+    print()
+    print(f"    {YELLOW}1{RST}  {BOLD}Hard mode{RST}  (metronome)")
+    print(f"       4-beat metronome. A new note appears on beat 4.")
+    print(f"       You must play the correct note on beats 2–3 of the next bar.")
+    print()
+    print(f"    {GREEN}2{RST}  {BOLD}Easy mode{RST}  (no timer)")
+    print(f"       A note + staff is shown. Take your time to find and play it.")
+    print(f"       The script waits until it hears your note, then shows the next.")
+    print()
+
+    # ── Get mode ─────────────────────────────────────────────────────────
+    while True:
+        raw = input(f"  Select mode [{YELLOW}1{RST}/{GREEN}2{RST}]: ").strip()
+        if raw in ("1", "2"):
+            mode = int(raw)
+            break
+        print(f"  {RED}Please enter 1 or 2.{RST}")
+
+    if mode == 1:
+        # ── Hard mode: ask for BPM ───────────────────────────────────
+        print()
+        print(f"  {DIM}Hard mode – metronome practice{RST}")
+        print(f"  How each bar works:")
+        print(f"    Beat 1  {RED}●{RST}  HIGH tick   – new bar")
+        print(f"    Beat 2  {YELLOW}●{RST}  MID tick    – 🎸 play the note HERE!")
+        print(f"    Beat 3  {DIM}●{RST}  LOW tick    – still listening …")
+        print(f"    Beat 4  {DIM}●{RST}  LOW tick    – result shown + next note")
+        print()
+
+        while True:
+            try:
+                raw = input(f"  Enter tempo (BPM, 40–200) [{CYAN}80{RST}]: ").strip()
+                if raw == "":
+                    bpm = 80
+                else:
+                    bpm = int(raw)
+                if 40 <= bpm <= 200:
+                    break
+                print(f"  {RED}Please enter a value between 40 and 200.{RST}")
+            except ValueError:
+                print(f"  {RED}Please enter a valid number.{RST}")
+
+        hard_mode(bpm)
+
+    else:
+        # ── Easy mode ────────────────────────────────────────────────
+        print()
+        print(f"  {DIM}Easy mode – take your time!{RST}")
+        print(f"  {DIM}Starting in 2 seconds …{RST}")
+        time.sleep(2)
+        easy_mode()
 
 
 if __name__ == "__main__":
