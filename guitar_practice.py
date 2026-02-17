@@ -44,6 +44,9 @@ MIN_FREQ = 60.0
 MAX_FREQ = 850.0
 SILENCE_THRESHOLD = 0.012
 
+# ─── Echo / Noise Removal ────────────────────────────────────────────────────
+ECHO_FLUSH_DURATION = 0.5   # seconds to discard audio after detection
+
 # ─── Note Definitions ────────────────────────────────────────────────────────
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -201,11 +204,20 @@ class PitchListener:
                 with self._lock:
                     self._detections.append(note_name)
 
-    def begin_listening(self):
-        """Start collecting detections (clears previous buffer)."""
+    def begin_listening(self, flush_duration: float = 0.0):
+        """Start collecting detections (clears previous buffer).
+
+        If *flush_duration* > 0, the microphone stays open for that many
+        seconds first so residual echo / string ring is consumed and
+        discarded before real detection begins.
+        """
         with self._lock:
             self._detections.clear()
         self._listening = True
+        if flush_duration > 0:
+            time.sleep(flush_duration)
+            with self._lock:
+                self._detections.clear()
 
     def end_listening(self):
         """Stop collecting and return the most-detected note name (or None)."""
@@ -487,15 +499,23 @@ def render(bpm, score, total, target_note, current_beat, last_result, phase):
 
 # ─── Easy Mode Display ───────────────────────────────────────────────────────
 
-def render_easy(score, total, target_note, last_result, status):
+def render_easy(score, total, target_note, last_result, status,
+                avg_response_time=None, current_elapsed=None):
     """Redraw the easy-mode UI."""
     pct = (score / total * 100) if total > 0 else 0
+
+    # Build the stats line
+    stats = f"  Score: {GREEN}{score}{RST}/{total}  │  Accuracy: {pct:.0f}%"
+    if avg_response_time is not None:
+        stats += f"  │  Avg: {CYAN}{avg_response_time:.1f}s{RST}"
+    if current_elapsed is not None:
+        stats += f"  │  ⏱ {YELLOW}{current_elapsed:.1f}s{RST}"
 
     lines = [
         "",
         f"  {BOLD}🎸  Guitar Note Practice  —  Easy Mode{RST}",
         f"  {DIM}{'━' * 50}{RST}",
-        f"  Score: {GREEN}{score}{RST}/{total}  │  Accuracy: {pct:.0f}%",
+        stats,
         f"  {DIM}{'━' * 50}{RST}",
         "",
     ]
@@ -550,6 +570,8 @@ def easy_mode():
     score = 0
     total = 0
     last_result = None
+    response_times: list[float] = []   # response times for correct notes
+    avg_rt = None                       # running average response time
 
     # Pick the first target note
     target_note = random.choice(PRACTICE_NOTES)["name"]
@@ -560,9 +582,11 @@ def easy_mode():
         while True:
             # ── Show target and listen ────────────────────────────
             render_easy(score, total, target_note, last_result,
-                        f"{CYAN}🎤 Listening … play {YELLOW}{target_note}{RST}")
+                        f"{CYAN}🎤 Listening … play {YELLOW}{target_note}{RST}",
+                        avg_response_time=avg_rt)
 
-            listener.begin_listening()
+            listener.begin_listening(flush_duration=ECHO_FLUSH_DURATION)
+            note_start_time = time.monotonic()   # start the clock
 
             # ── Collect microphone samples until a stable note is detected ──
             # We accumulate detections over short windows and require
@@ -580,9 +604,16 @@ def easy_mode():
                 with listener._lock:
                     detections = listener._detections.copy()
 
+                elapsed = time.monotonic() - note_start_time
+
                 if not detections:
                     consistent_count = 0
                     last_detected = None
+                    # Redraw with live timer even when silent
+                    render_easy(score, total, target_note, last_result,
+                                f"{CYAN}🎤 Listening … play {YELLOW}{target_note}{RST}",
+                                avg_response_time=avg_rt,
+                                current_elapsed=elapsed)
                     continue
 
                 # Take the most common note in the buffer
@@ -597,20 +628,26 @@ def easy_mode():
 
                 # Update status while listening
                 render_easy(score, total, target_note, last_result,
-                            f"{CYAN}🎤 Hearing: {WHITE}{top_note}{RST}")
+                            f"{CYAN}🎤 Hearing: {WHITE}{top_note}{RST}",
+                            avg_response_time=avg_rt,
+                            current_elapsed=elapsed)
 
                 if consistent_count >= MIN_CONSISTENT:
                     detected = top_note
 
             listener.end_listening()
+            response_time = time.monotonic() - note_start_time
 
             # ── Evaluate ─────────────────────────────────────────
             total += 1
             if detected == target_note:
                 score += 1
+                response_times.append(response_time)
+                avg_rt = sum(response_times) / len(response_times)
                 last_result = (
                     f"{GREEN}✓  Correct!{RST}  "
-                    f"Played {GREEN}{detected}{RST}"
+                    f"Played {GREEN}{detected}{RST}  "
+                    f"in {CYAN}{response_time:.1f}s{RST}"
                 )
             else:
                 last_result = (
@@ -621,7 +658,8 @@ def easy_mode():
 
             # ── Show result briefly, then next note ──────────────
             render_easy(score, total, target_note, last_result,
-                        f"{DIM}Next note in a moment …{RST}")
+                        f"{DIM}Next note in a moment …{RST}",
+                        avg_response_time=avg_rt)
             time.sleep(1.5)
 
             # Pick next target
@@ -712,7 +750,7 @@ def hard_mode(bpm: int):
 
                 # On beat 2: start listening for the user's guitar
                 if beat_num == 2 and not is_intro and target_note:
-                    listener.begin_listening()
+                    listener.begin_listening(flush_duration=ECHO_FLUSH_DURATION)
 
                 # On beat 4: pick & display the next target note
                 if beat_num == 4:
